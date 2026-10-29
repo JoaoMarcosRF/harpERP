@@ -1,0 +1,53 @@
+# ==============================================================================
+# harErp — Git Ignore Rules
+# ==============================================================================
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment variables (keep .env.example tracked)
+.env
+.env.local
+.env.*.local
+
+# Local SQLite databases & backups
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Generated reports & exports
+*.xlsx
+*.pdf
+*.csv
+
+# PyInstaller / distribution / packaging artifacts
+build/
+dist/
+*.spec
+*.egg-info/
+.eggs/
+
+# Unit test / coverage artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE & OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+Desktop.ini
