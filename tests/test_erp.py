@@ -121,6 +121,59 @@ class TestHarErp(unittest.TestCase):
         database.restaurar_backup(bkp)
         self.assertGreater(len(database.listar_ingredientes()), 0)
 
+    def test_category_creation_and_renaming(self):
+        cid = database.adicionar_categoria("Gourmet Line", "produto", "Premium recipes")
+        self.assertIsNotNone(cid)
+        self.assertIn("Gourmet Line", database.listar_nomes_categorias("produto"))
+
+        iid = database.adicionar_ingrediente("Cocoa", "Brand", "Chocolates", 5.0, 1.0, "kg", 20.0)
+        rid = database.salvar_receita(
+            "Gourmet Cake", 8, "", [{"ingrediente_id": iid, "quantidade": 0.5}],
+            categoria="Gourmet Line", preco_venda=25.0
+        )
+
+        # Rename category and verify product/recipe is updated automatically
+        database.renomear_categoria(cid, "Signature Line")
+        self.assertIn("Signature Line", database.listar_nomes_categorias("produto"))
+        rec, _ = database.obter_receita(rid)
+        self.assertEqual(rec["categoria"], "Signature Line")
+
+    def test_operational_products_and_movements(self):
+        pid = database.adicionar_produto_operacional(
+            "Sanitizer 5L", "CleanCo", "Limpeza e Higiene", 2.0, 1.0, "un", 20.00,
+            observacao="Kitchen cleaning", lancar_financeiro=True
+        )
+        # Inflow of 2 units at $30.00 -> weighted average cost becomes $25.00
+        database.registrar_mov_operacional(
+            pid, "entrada", 2.0, "Monthly restock", novo_custo=30.00, lancar_financeiro=True
+        )
+        # Outflow (consumption) of 3 units -> remaining 1 unit (<= min stock 1.0 -> alert)
+        database.registrar_mov_operacional(pid, "saida", 3.0, "Weekly use")
+
+        op = database.obter_produto_operacional(pid)
+        self.assertAlmostEqual(op["quantidade"], 1.0)
+        self.assertAlmostEqual(op["preco_custo"], 25.00)
+        self.assertEqual(len(database.operacionais_abaixo_minimo()), 1)
+
+        _, desp, _ = database.saldo_atual()
+        # 2 * $20 (initial) + 2 * $30 (restock) = $100
+        self.assertAlmostEqual(desp, 100.00)
+
+    def test_persistence_across_close_and_reopen(self):
+        iid = database.adicionar_ingrediente("Butter", "Farm", "Dairy", 4.0, 1.0, "kg", 30.0)
+        database.atualizar_ingrediente(iid, "Butter", "Farm", "Dairy", 1.0, "kg", 30.0, quantidade=6.5)
+        pid = database.adicionar_produto_operacional("Gloves Box", "Safe", "EPI", 5.0, 2.0, "cx", 18.0)
+        database.sincronizar_banco()
+
+        # Re-query from disk as a fresh session would after closing and reopening
+        database.criar_tabelas()
+        ing = database.obter_ingrediente(iid)
+        op = database.obter_produto_operacional(pid)
+        self.assertIsNotNone(ing)
+        self.assertAlmostEqual(ing["quantidade"], 6.5)
+        self.assertIsNotNone(op)
+        self.assertAlmostEqual(op["quantidade"], 5.0)
+
 
 if __name__ == "__main__":
     unittest.main()

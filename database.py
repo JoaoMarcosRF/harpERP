@@ -15,29 +15,55 @@ import csv
 import math
 import os
 import sqlite3
+import sys
 from datetime import datetime, timedelta
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+def _resolve_base_dir():
+    """
+    Resolves the persistent application directory.
+    When packaged as a PyInstaller executable (sys.frozen), __file__ points to
+    a temporary _MEIxxxxxx folder that is deleted on exit. Using sys.executable
+    ensures estoque.db is saved persistently on disk across restarts.
+    """
+    if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        parent_dir = os.path.dirname(exe_dir)
+        if os.path.basename(exe_dir).lower() == "dist" and (
+            os.path.exists(os.path.join(parent_dir, "estoque.db"))
+            or os.path.exists(os.path.join(parent_dir, "main.py"))
+        ):
+            return parent_dir
+        return exe_dir
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+BASE_DIR = _resolve_base_dir()
 
 
 def load_env(env_path=None):
     """Loads key=value pairs from .env into os.environ without external dependencies."""
-    path = env_path or os.path.join(BASE_DIR, ".env")
-    if not os.path.exists(path):
-        return
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            for raw_line in f:
-                line = raw_line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, val = line.split("=", 1)
-                key = key.strip()
-                val = val.strip().strip('"').strip("'")
-                if key and key not in os.environ:
-                    os.environ[key] = val
-    except OSError:
-        pass
+    candidates = [env_path] if env_path else [
+        os.path.join(BASE_DIR, ".env"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
+    ]
+    for path in candidates:
+        if not path or not os.path.exists(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for raw_line in f:
+                    line = raw_line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, val = line.split("=", 1)
+                    key = key.strip()
+                    val = val.strip().strip('"').strip("'")
+                    if key and key not in os.environ:
+                        os.environ[key] = val
+            break
+        except OSError:
+            pass
 
 
 load_env()
@@ -48,10 +74,25 @@ EXPIRY_WARNING_DAYS = int(os.environ.get("HARERP_EXPIRY_WARNING_DAYS", "7") or 7
 
 
 def conectar():
-    conn = sqlite3.connect(DB_PATH)
+    db_dir = os.path.dirname(os.path.abspath(DB_PATH))
+    if db_dir and not os.path.exists(db_dir):
+        os.makedirs(db_dir, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH, timeout=15.0)
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA synchronous = FULL")
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def sincronizar_banco():
+    """Forces SQLite WAL/journal checkpoint and flushes pending disk writes before exit."""
+    try:
+        conn = conectar()
+        conn.execute("PRAGMA wal_checkpoint(FULL)")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
 
 
 def hoje():
@@ -72,6 +113,17 @@ def _garantir_coluna(cursor, tabela, coluna, definicao):
 def criar_tabelas():
     conn = conectar()
     c = conn.cursor()
+
+    # Categorias centralizadas (produtos/receitas, ingredientes, operacionais, financeiro)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS categorias (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            nome      TEXT NOT NULL,
+            escopo    TEXT NOT NULL DEFAULT 'geral',
+            descricao TEXT DEFAULT '',
+            UNIQUE(nome, escopo)
+        )
+    """)
 
     # Ingredientes (insumos / matérias-primas)
     c.execute("""
@@ -101,17 +153,49 @@ def criar_tabelas():
         )
     """)
 
-    # Receitas (fichas técnicas)
+    # Produtos Operacionais (insumos de operação, limpeza, descartáveis, utensílios, manutenção)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS produtos_operacionais (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            nome            TEXT    NOT NULL,
+            marca           TEXT    DEFAULT '',
+            categoria       TEXT    DEFAULT '',
+            quantidade      REAL    NOT NULL DEFAULT 0,
+            estoque_minimo  REAL    NOT NULL DEFAULT 0,
+            unidade         TEXT    DEFAULT 'un',
+            preco_custo     REAL    NOT NULL DEFAULT 0,
+            observacao      TEXT    DEFAULT '',
+            data_cadastro   TEXT    NOT NULL
+        )
+    """)
+
+    # Movimentações de produtos operacionais
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS mov_operacionais (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            produto_id     INTEGER NOT NULL,
+            tipo           TEXT    NOT NULL CHECK(tipo IN ('entrada','saida')),
+            quantidade     REAL    NOT NULL,
+            custo_unitario REAL    NOT NULL DEFAULT 0,
+            data           TEXT    NOT NULL,
+            observacao     TEXT    DEFAULT '',
+            FOREIGN KEY (produto_id) REFERENCES produtos_operacionais(id) ON DELETE CASCADE
+        )
+    """)
+
+    # Receitas (fichas técnicas / produtos)
     c.execute("""
         CREATE TABLE IF NOT EXISTS receitas (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
             nome          TEXT    NOT NULL,
+            categoria     TEXT    DEFAULT '',
             rendimento    INTEGER NOT NULL DEFAULT 1,
             validade_dias INTEGER DEFAULT NULL,
             preco_venda   REAL    NOT NULL DEFAULT 0,
             observacao    TEXT    DEFAULT ''
         )
     """)
+    _garantir_coluna(c, "receitas", "categoria", "TEXT DEFAULT ''")
     _garantir_coluna(c, "receitas", "validade_dias", "INTEGER DEFAULT NULL")
     _garantir_coluna(c, "receitas", "preco_venda", "REAL NOT NULL DEFAULT 0")
 
@@ -170,6 +254,206 @@ def criar_tabelas():
         )
     """)
 
+    # Categorias padrão iniciais
+    default_cats = [
+        # Ingredientes / Matérias-primas
+        ("Secos e Farináceos", "ingrediente", "Farinhas, açúcares, pós e grãos"),
+        ("Laticínios", "ingrediente", "Leite, manteiga, creme de leite, queijos"),
+        ("Chocolates e Cacau", "ingrediente", "Barras, gotas, cacau em pó"),
+        ("Perecíveis e Ovos", "ingrediente", "Ovos, frutas frescas e refrigerados"),
+        ("Gorduras e Óleos", "ingrediente", "Óleos vegetais, margarinas e gorduras"),
+        ("Essências e Aditivos", "ingrediente", "Fermentos, extratos, corantes e aromas"),
+        ("Embalagens de Produto", "ingrediente", "Embalagens que compõem a ficha técnica"),
+        # Produtos / Receitas
+        ("Confeitaria e Doces", "produto", "Bolos, brownies, cookies, doces"),
+        ("Padaria e Massas", "produto", "Pães, massas artesanais e assados"),
+        ("Sobremesas Geladas", "produto", "Tortas, mousses e sobremesas refrigeradas"),
+        ("Salgados", "produto", "Salgados assados, folhados e quiches"),
+        ("Bebidas", "produto", "Cafés, sucos e bebidas especiais"),
+        ("Kits e Cestas", "produto", "Combos, caixas presenteáveis e sazonais"),
+        # Produtos Operacionais
+        ("Limpeza e Higiene", "operacional", "Detergentes, álcool, desinfetantes, papel toalha"),
+        ("Descartáveis", "operacional", "Luvas, toucas, sacolas, guardanapos, copos"),
+        ("Embalagens Operacionais", "operacional", "Caixas de transporte, fita adesiva, filme PVC, papel alumínio"),
+        ("Utensílios de Produção", "operacional", "Formas, espátulas, bicos, panos e acessórios"),
+        ("Manutenção e Reparos", "operacional", "Peças de reposição, lâmpadas, materiais de reparo"),
+        ("EPI e Segurança", "operacional", "Aventais, luvas térmicas, equipamentos de proteção"),
+        ("Escritório e Expedição", "operacional", "Etiquetas, bobinas térmicas, canetas, impressos"),
+        # Financeiro
+        ("Venda de Produtos", "financeiro", "Receita com vendas de lotes e produtos"),
+        ("Compra de Insumos", "financeiro", "Aquisição de matérias-primas e ingredientes"),
+        ("Produtos Operacionais", "financeiro", "Compra de itens operacionais, limpeza e descartáveis"),
+        ("Custos Fixos", "financeiro", "Aluguel, internet, contabilidade"),
+        ("Energia, Água e Gás", "financeiro", "Utilidades de operação"),
+        ("Marketing e Delivery", "financeiro", "Anúncios, taxas de aplicativos e entregas"),
+    ]
+    c.executemany(
+        "INSERT OR IGNORE INTO categorias (nome, escopo, descricao) VALUES (?,?,?)",
+        default_cats,
+    )
+
+    conn.commit()
+    conn.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CATEGORIAS (PRODUTOS / INGREDIENTES / OPERACIONAIS / FINANCEIRO)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _garantir_categoria_conn(conn, nome, escopo="geral", descricao=""):
+    nome_limpo = (nome or "").strip()
+    if not nome_limpo:
+        return None
+    escopo_limpo = (escopo or "geral").strip().lower()
+    conn.execute(
+        "INSERT OR IGNORE INTO categorias (nome, escopo, descricao) VALUES (?,?,?)",
+        (nome_limpo, escopo_limpo, (descricao or "").strip()),
+    )
+    row = conn.execute(
+        "SELECT id FROM categorias WHERE nome=? AND escopo=?",
+        (nome_limpo, escopo_limpo),
+    ).fetchone()
+    return row["id"] if row else None
+
+
+def adicionar_categoria(nome, escopo="geral", descricao=""):
+    nome_limpo = (nome or "").strip()
+    if not nome_limpo:
+        raise ValueError("O nome da categoria é obrigatório.")
+    escopo_limpo = (escopo or "geral").strip().lower()
+    conn = conectar()
+    cur = conn.execute(
+        "SELECT id FROM categorias WHERE LOWER(nome)=LOWER(?) AND escopo=?",
+        (nome_limpo, escopo_limpo),
+    ).fetchone()
+    if cur:
+        cat_id = cur["id"]
+        conn.execute(
+            "UPDATE categorias SET nome=?, descricao=? WHERE id=?",
+            (nome_limpo, (descricao or "").strip(), cat_id),
+        )
+    else:
+        c = conn.execute(
+            "INSERT INTO categorias (nome, escopo, descricao) VALUES (?,?,?)",
+            (nome_limpo, escopo_limpo, (descricao or "").strip()),
+        )
+        cat_id = c.lastrowid
+    conn.commit()
+    conn.close()
+    return cat_id
+
+
+def listar_categorias(escopo=None):
+    """
+    Retorna lista de dicts {id, nome, escopo, descricao} combinando as categorias
+    cadastradas na tabela `categorias` com eventuais categorias já usadas nos registros.
+    """
+    conn = conectar()
+    if escopo:
+        escopo_limpo = escopo.strip().lower()
+        rows = conn.execute(
+            """
+            SELECT id, nome, escopo, descricao
+            FROM categorias
+            WHERE escopo=? OR escopo='geral'
+            ORDER BY nome COLLATE NOCASE
+            """,
+            (escopo_limpo,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id, nome, escopo, descricao FROM categorias ORDER BY escopo, nome COLLATE NOCASE"
+        ).fetchall()
+
+    resultado = [dict(r) for r in rows]
+    nomes_existentes = {(r["nome"].lower(), r["escopo"]) for r in resultado}
+    nomes_simples = {r["nome"].lower() for r in resultado}
+
+    # Sincroniza categorias que já existiam nas tabelas de itens
+    fontes = []
+    if escopo in (None, "ingrediente"):
+        fontes.append(("ingredientes", "ingrediente"))
+    if escopo in (None, "produto"):
+        fontes.append(("receitas", "produto"))
+    if escopo in (None, "operacional"):
+        fontes.append(("produtos_operacionais", "operacional"))
+    if escopo in (None, "financeiro"):
+        fontes.append(("movimentacoes_financeiras", "financeiro"))
+
+    inseriu = False
+    for tabela, esc in fontes:
+        try:
+            distintos = conn.execute(
+                f"SELECT DISTINCT TRIM(categoria) AS cat FROM {tabela} WHERE TRIM(COALESCE(categoria,'')) != ''"
+            ).fetchall()
+            for d in distintos:
+                cat_nome = d["cat"]
+                if cat_nome and (cat_nome.lower(), esc) not in nomes_existentes and cat_nome.lower() not in nomes_simples:
+                    cid = _garantir_categoria_conn(conn, cat_nome, esc)
+                    inseriu = True
+                    resultado.append({
+                        "id": cid,
+                        "nome": cat_nome,
+                        "escopo": esc,
+                        "descricao": "",
+                    })
+                    nomes_existentes.add((cat_nome.lower(), esc))
+                    nomes_simples.add(cat_nome.lower())
+        except sqlite3.OperationalError:
+            pass
+
+    if inseriu:
+        conn.commit()
+    conn.close()
+    resultado.sort(key=lambda x: x["nome"].lower())
+    return resultado
+
+
+def listar_nomes_categorias(escopo=None):
+    """Retorna lista ordenada apenas com os nomes únicos de categorias para Combobox."""
+    vistos = set()
+    nomes = []
+    for c in listar_categorias(escopo):
+        chave = c["nome"].strip().lower()
+        if chave and chave not in vistos:
+            vistos.add(chave)
+            nomes.append(c["nome"].strip())
+    return nomes
+
+
+def renomear_categoria(cat_id, novo_nome):
+    novo_limpo = (novo_nome or "").strip()
+    if not novo_limpo:
+        raise ValueError("Informe o novo nome da categoria.")
+    conn = conectar()
+    atual = conn.execute("SELECT * FROM categorias WHERE id=?", (cat_id,)).fetchone()
+    if not atual:
+        conn.close()
+        raise ValueError("Categoria não encontrada.")
+
+    nome_antigo = atual["nome"]
+    escopo = atual["escopo"]
+    conn.execute(
+        "UPDATE categorias SET nome=? WHERE id=?",
+        (novo_limpo, cat_id),
+    )
+    # Atualiza os itens vinculados
+    if escopo in ("ingrediente", "geral"):
+        conn.execute("UPDATE ingredientes SET categoria=? WHERE categoria=?", (novo_limpo, nome_antigo))
+    if escopo in ("produto", "geral"):
+        conn.execute("UPDATE receitas SET categoria=? WHERE categoria=?", (novo_limpo, nome_antigo))
+    if escopo in ("operacional", "geral"):
+        conn.execute("UPDATE produtos_operacionais SET categoria=? WHERE categoria=?", (novo_limpo, nome_antigo))
+    if escopo in ("financeiro", "geral"):
+        conn.execute("UPDATE movimentacoes_financeiras SET categoria=? WHERE categoria=?", (novo_limpo, nome_antigo))
+
+    conn.commit()
+    conn.close()
+
+
+def excluir_categoria(cat_id):
+    conn = conectar()
+    conn.execute("DELETE FROM categorias WHERE id=?", (cat_id,))
     conn.commit()
     conn.close()
 
@@ -181,6 +465,8 @@ def criar_tabelas():
 def adicionar_ingrediente(nome, marca, categoria, quantidade,
                            estoque_minimo, unidade, preco_custo):
     conn = conectar()
+    if categoria and categoria.strip():
+        _garantir_categoria_conn(conn, categoria.strip(), "ingrediente")
     cur = conn.execute("""
         INSERT INTO ingredientes
             (nome, marca, categoria, quantidade, estoque_minimo, unidade, preco_custo, data_cadastro)
@@ -197,16 +483,17 @@ def adicionar_ingrediente(nome, marca, categoria, quantidade,
     return novo_id
 
 
-def listar_ingredientes(termo=None):
+def listar_ingredientes(termo=None, categoria=None):
     conn = conectar()
+    cond, params = [], []
     if termo:
-        cur = conn.execute("""
-            SELECT * FROM ingredientes
-            WHERE nome LIKE ? OR marca LIKE ? OR categoria LIKE ?
-            ORDER BY nome
-        """, (f"%{termo}%",) * 3)
-    else:
-        cur = conn.execute("SELECT * FROM ingredientes ORDER BY nome")
+        cond.append("(nome LIKE ? OR marca LIKE ? OR categoria LIKE ?)")
+        params.extend([f"%{termo}%"] * 3)
+    if categoria:
+        cond.append("categoria = ?")
+        params.append(categoria)
+    where = ("WHERE " + " AND ".join(cond)) if cond else ""
+    cur = conn.execute(f"SELECT * FROM ingredientes {where} ORDER BY nome", params)
     rows = cur.fetchall()
     conn.close()
     return rows
@@ -220,13 +507,31 @@ def obter_ingrediente(iid):
 
 
 def atualizar_ingrediente(iid, nome, marca, categoria,
-                           estoque_minimo, unidade, preco_custo):
+                           estoque_minimo, unidade, preco_custo, quantidade=None):
     conn = conectar()
-    conn.execute("""
-        UPDATE ingredientes
-        SET nome=?, marca=?, categoria=?, estoque_minimo=?, unidade=?, preco_custo=?
-        WHERE id=?
-    """, (nome, marca, categoria, estoque_minimo, unidade, preco_custo, iid))
+    if categoria and categoria.strip():
+        _garantir_categoria_conn(conn, categoria.strip(), "ingrediente")
+    if quantidade is not None:
+        atual = conn.execute("SELECT quantidade FROM ingredientes WHERE id=?", (iid,)).fetchone()
+        if atual is not None:
+            diff = round(float(quantidade) - float(atual["quantidade"]), 6)
+            if abs(diff) > 1e-6:
+                tipo_aj = "entrada" if diff > 0 else "saida"
+                conn.execute("""
+                    INSERT INTO mov_ingredientes (ingrediente_id, tipo, quantidade, data, observacao)
+                    VALUES (?, ?, ?, ?, 'Ajuste direto no cadastro')
+                """, (iid, tipo_aj, abs(diff), hoje()))
+        conn.execute("""
+            UPDATE ingredientes
+            SET nome=?, marca=?, categoria=?, quantidade=?, estoque_minimo=?, unidade=?, preco_custo=?
+            WHERE id=?
+        """, (nome, marca, categoria, round(float(quantidade), 6), estoque_minimo, unidade, preco_custo, iid))
+    else:
+        conn.execute("""
+            UPDATE ingredientes
+            SET nome=?, marca=?, categoria=?, estoque_minimo=?, unidade=?, preco_custo=?
+            WHERE id=?
+        """, (nome, marca, categoria, estoque_minimo, unidade, preco_custo, iid))
     conn.commit()
     conn.close()
 
@@ -322,28 +627,218 @@ def listar_mov_ingredientes(iid=None):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RECEITAS (FICHAS TÉCNICAS)
+# PRODUTOS OPERACIONAIS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def adicionar_produto_operacional(nome, marca, categoria, quantidade,
+                                  estoque_minimo, unidade, preco_custo,
+                                  observacao="", lancar_financeiro=False):
+    conn = conectar()
+    if categoria and categoria.strip():
+        _garantir_categoria_conn(conn, categoria.strip(), "operacional")
+    cur = conn.execute("""
+        INSERT INTO produtos_operacionais
+            (nome, marca, categoria, quantidade, estoque_minimo, unidade, preco_custo, observacao, data_cadastro)
+        VALUES (?,?,?,?,?,?,?,?,?)
+    """, (nome, marca, categoria, quantidade, estoque_minimo, unidade, preco_custo, observacao, hoje()))
+    novo_id = cur.lastrowid
+    if quantidade > 0:
+        conn.execute("""
+            INSERT INTO mov_operacionais (produto_id, tipo, quantidade, custo_unitario, data, observacao)
+            VALUES (?, 'entrada', ?, ?, ?, 'Estoque inicial no cadastro')
+        """, (novo_id, round(quantidade, 6), round(preco_custo, 4), hoje()))
+        if lancar_financeiro and preco_custo > 0:
+            valor_compra = round(quantidade * preco_custo, 2)
+            if valor_compra > 0:
+                desc = f"Compra inicial: {round(quantidade, 4)} {unidade} de {nome}"
+                conn.execute("""
+                    INSERT INTO movimentacoes_financeiras (tipo, categoria, descricao, valor, data)
+                    VALUES ('despesa', 'Produtos Operacionais', ?, ?, ?)
+                """, (desc, valor_compra, hoje()))
+    conn.commit()
+    conn.close()
+    return novo_id
+
+
+def listar_produtos_operacionais(termo=None, categoria=None):
+    conn = conectar()
+    cond, params = [], []
+    if termo:
+        cond.append("(nome LIKE ? OR marca LIKE ? OR categoria LIKE ? OR observacao LIKE ?)")
+        params.extend([f"%{termo}%"] * 4)
+    if categoria:
+        cond.append("categoria = ?")
+        params.append(categoria)
+    where = ("WHERE " + " AND ".join(cond)) if cond else ""
+    cur = conn.execute(f"SELECT * FROM produtos_operacionais {where} ORDER BY nome", params)
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def obter_produto_operacional(pid):
+    conn = conectar()
+    row = conn.execute("SELECT * FROM produtos_operacionais WHERE id=?", (pid,)).fetchone()
+    conn.close()
+    return row
+
+
+def atualizar_produto_operacional(pid, nome, marca, categoria,
+                                  estoque_minimo, unidade, preco_custo,
+                                  quantidade=None, observacao=""):
+    conn = conectar()
+    if categoria and categoria.strip():
+        _garantir_categoria_conn(conn, categoria.strip(), "operacional")
+    if quantidade is not None:
+        atual = conn.execute("SELECT quantidade FROM produtos_operacionais WHERE id=?", (pid,)).fetchone()
+        if atual is not None:
+            diff = round(float(quantidade) - float(atual["quantidade"]), 6)
+            if abs(diff) > 1e-6:
+                tipo_aj = "entrada" if diff > 0 else "saida"
+                conn.execute("""
+                    INSERT INTO mov_operacionais (produto_id, tipo, quantidade, custo_unitario, data, observacao)
+                    VALUES (?, ?, ?, ?, ?, 'Ajuste direto no cadastro')
+                """, (pid, tipo_aj, abs(diff), round(float(preco_custo), 4), hoje()))
+        conn.execute("""
+            UPDATE produtos_operacionais
+            SET nome=?, marca=?, categoria=?, quantidade=?, estoque_minimo=?, unidade=?, preco_custo=?, observacao=?
+            WHERE id=?
+        """, (nome, marca, categoria, round(float(quantidade), 6), estoque_minimo, unidade, preco_custo, observacao, pid))
+    else:
+        conn.execute("""
+            UPDATE produtos_operacionais
+            SET nome=?, marca=?, categoria=?, estoque_minimo=?, unidade=?, preco_custo=?, observacao=?
+            WHERE id=?
+        """, (nome, marca, categoria, estoque_minimo, unidade, preco_custo, observacao, pid))
+    conn.commit()
+    conn.close()
+
+
+def excluir_produto_operacional(pid):
+    conn = conectar()
+    conn.execute("DELETE FROM produtos_operacionais WHERE id=?", (pid,))
+    conn.commit()
+    conn.close()
+
+
+def operacionais_abaixo_minimo():
+    conn = conectar()
+    rows = conn.execute("""
+        SELECT * FROM produtos_operacionais WHERE quantidade <= estoque_minimo ORDER BY nome
+    """).fetchall()
+    conn.close()
+    return rows
+
+
+def registrar_mov_operacional(pid, tipo, quantidade, observacao="",
+                              novo_custo=None, lancar_financeiro=False):
+    if tipo not in ("entrada", "saida"):
+        raise ValueError("tipo deve ser 'entrada' ou 'saida'")
+    if quantidade <= 0:
+        raise ValueError("quantidade deve ser maior que zero")
+    conn = conectar()
+    atual = conn.execute(
+        "SELECT nome, unidade, quantidade, preco_custo FROM produtos_operacionais WHERE id=?",
+        (pid,)
+    ).fetchone()
+    if atual is None:
+        conn.close()
+        raise ValueError("Produto operacional não encontrado")
+
+    qtd_atual = atual["quantidade"]
+    custo_atual = atual["preco_custo"]
+    nova_qtd = round(qtd_atual + quantidade if tipo == "entrada" else qtd_atual - quantidade, 6)
+    if nova_qtd < 0:
+        conn.close()
+        raise ValueError("Estoque insuficiente para essa baixa operacional")
+
+    custo_final = custo_atual
+    custo_operacao = custo_atual
+    if tipo == "entrada" and novo_custo is not None and novo_custo > 0:
+        custo_operacao = novo_custo
+        if qtd_atual > 0 and nova_qtd > 0:
+            custo_final = round(((qtd_atual * custo_atual) + (quantidade * novo_custo)) / nova_qtd, 4)
+        else:
+            custo_final = round(novo_custo, 4)
+
+    conn.execute("""
+        INSERT INTO mov_operacionais (produto_id, tipo, quantidade, custo_unitario, data, observacao)
+        VALUES (?,?,?,?,?,?)
+    """, (pid, tipo, round(quantidade, 6), round(custo_operacao, 4), hoje(), observacao))
+    conn.execute(
+        "UPDATE produtos_operacionais SET quantidade=?, preco_custo=? WHERE id=?",
+        (nova_qtd, custo_final, pid)
+    )
+
+    if tipo == "entrada" and lancar_financeiro:
+        valor_compra = round(quantidade * custo_operacao, 2)
+        if valor_compra > 0:
+            desc = f"Compra operacional: {round(quantidade, 4)} {atual['unidade']} de {atual['nome']}"
+            if observacao:
+                desc += f" ({observacao})"
+            conn.execute("""
+                INSERT INTO movimentacoes_financeiras (tipo, categoria, descricao, valor, data)
+                VALUES ('despesa', 'Produtos Operacionais', ?, ?, ?)
+            """, (desc, valor_compra, hoje()))
+
+    conn.commit()
+    conn.close()
+
+
+def listar_mov_operacionais(pid=None):
+    conn = conectar()
+    if pid:
+        cur = conn.execute("""
+            SELECT m.*, p.nome AS produto_nome, p.unidade
+            FROM mov_operacionais m JOIN produtos_operacionais p ON p.id=m.produto_id
+            WHERE m.produto_id=? ORDER BY m.data DESC, m.id DESC
+        """, (pid,))
+    else:
+        cur = conn.execute("""
+            SELECT m.*, p.nome AS produto_nome, p.unidade
+            FROM mov_operacionais m JOIN produtos_operacionais p ON p.id=m.produto_id
+            ORDER BY m.data DESC, m.id DESC
+        """)
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def custo_total_operacionais_estoque():
+    conn = conectar()
+    val = conn.execute(
+        "SELECT COALESCE(SUM(preco_custo * quantidade), 0) AS t FROM produtos_operacionais"
+    ).fetchone()["t"]
+    conn.close()
+    return val
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RECEITAS (FICHAS TÉCNICAS / PRODUTOS)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def salvar_receita(nome, rendimento, observacao, componentes,
-                   receita_id=None, validade_dias=None, preco_venda=0.0):
+                   receita_id=None, validade_dias=None, preco_venda=0.0, categoria=""):
     """
     componentes: lista de dicts {ingrediente_id, quantidade}
     Retorna o id da receita salva.
     """
     conn = conectar()
+    cat_limpa = (categoria or "").strip()
+    if cat_limpa:
+        _garantir_categoria_conn(conn, cat_limpa, "produto")
     if receita_id is None:
         cur = conn.execute("""
-            INSERT INTO receitas (nome, rendimento, validade_dias, preco_venda, observacao)
-            VALUES (?,?,?,?,?)
-        """, (nome, rendimento, validade_dias, preco_venda, observacao))
+            INSERT INTO receitas (nome, categoria, rendimento, validade_dias, preco_venda, observacao)
+            VALUES (?,?,?,?,?,?)
+        """, (nome, cat_limpa, rendimento, validade_dias, preco_venda, observacao))
         receita_id = cur.lastrowid
     else:
         conn.execute("""
             UPDATE receitas
-            SET nome=?, rendimento=?, validade_dias=?, preco_venda=?, observacao=?
+            SET nome=?, categoria=?, rendimento=?, validade_dias=?, preco_venda=?, observacao=?
             WHERE id=?
-        """, (nome, rendimento, validade_dias, preco_venda, observacao, receita_id))
+        """, (nome, cat_limpa, rendimento, validade_dias, preco_venda, observacao, receita_id))
         conn.execute("DELETE FROM receita_ingredientes WHERE receita_id=?", (receita_id,))
 
     for c in componentes:
@@ -356,9 +851,17 @@ def salvar_receita(nome, rendimento, observacao, componentes,
     return receita_id
 
 
-def listar_receitas():
+def listar_receitas(termo=None, categoria=None):
     conn = conectar()
-    rows = conn.execute("SELECT * FROM receitas ORDER BY nome").fetchall()
+    cond, params = [], []
+    if termo:
+        cond.append("(nome LIKE ? OR categoria LIKE ? OR observacao LIKE ?)")
+        params.extend([f"%{termo}%"] * 3)
+    if categoria:
+        cond.append("categoria = ?")
+        params.append(categoria)
+    where = ("WHERE " + " AND ".join(cond)) if cond else ""
+    rows = conn.execute(f"SELECT * FROM receitas {where} ORDER BY nome", params).fetchall()
     conn.close()
     return rows
 
@@ -394,9 +897,9 @@ def calcular_custo_receita(receita_id):
     return custo_lote, custo_lote / rend
 
 
-def analise_rentabilidade_receitas():
+def analise_rentabilidade_receitas(termo=None, categoria=None):
     """Retorna lista de dicts com análise de custo, preço de venda e margem de cada receita."""
-    receitas = listar_receitas()
+    receitas = listar_receitas(termo=termo, categoria=categoria)
     resultado = []
     for r in receitas:
         _, comps = obter_receita(r["id"])
@@ -409,6 +912,7 @@ def analise_rentabilidade_receitas():
         resultado.append({
             "id": r["id"],
             "nome": r["nome"],
+            "categoria": r["categoria"] if "categoria" in r.keys() and r["categoria"] else "",
             "rendimento": rend,
             "validade_dias": r["validade_dias"],
             "n_ingredientes": len(comps),
@@ -731,6 +1235,8 @@ def adicionar_movimentacao_financeira(tipo, categoria, descricao, valor, data=No
     if valor <= 0:
         raise ValueError("valor deve ser > 0")
     conn = conectar()
+    if categoria and categoria.strip():
+        _garantir_categoria_conn(conn, categoria.strip(), "financeiro")
     conn.execute("""
         INSERT INTO movimentacoes_financeiras (tipo, categoria, descricao, valor, data)
         VALUES (?,?,?,?,?)
@@ -745,6 +1251,8 @@ def atualizar_movimentacao_financeira(mov_id, tipo, categoria, descricao, valor,
     if valor <= 0:
         raise ValueError("valor deve ser > 0")
     conn = conectar()
+    if categoria and categoria.strip():
+        _garantir_categoria_conn(conn, categoria.strip(), "financeiro")
     conn.execute("""
         UPDATE movimentacoes_financeiras
         SET tipo=?, categoria=?, descricao=?, valor=?, data=?
@@ -1125,7 +1633,7 @@ def restaurar_backup(caminho_origem):
     return DB_PATH
 
 
-def exportar_csv_tabelas(diretorio_destino):
+def exportar_csv_tabelas(diretorio_destino, incluir_operacionais=False):
     """Exports core database tables to UTF-8-BOM CSV files."""
     os.makedirs(diretorio_destino, exist_ok=True)
     arquivos = []
@@ -1143,9 +1651,9 @@ def exportar_csv_tabelas(diretorio_destino):
     cam_rec = os.path.join(diretorio_destino, "harerp_recipes.csv")
     with open(cam_rec, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f, delimiter=";")
-        w.writerow(["ID", "Name", "Yield", "Shelf Life Days", "Batch Cost", "Unit Cost", "Selling Price", "Margin %"])
+        w.writerow(["ID", "Name", "Category", "Yield", "Shelf Life Days", "Batch Cost", "Unit Cost", "Selling Price", "Margin %"])
         for r in analise_rentabilidade_receitas():
-            w.writerow([r["id"], r["nome"], r["rendimento"], r["validade_dias"] or "", round(r["custo_lote"], 4), round(r["custo_unitario"], 4), round(r["preco_venda"], 2), round(r["margem_percentual"], 2)])
+            w.writerow([r["id"], r["nome"], r.get("categoria", ""), r["rendimento"], r["validade_dias"] or "", round(r["custo_lote"], 4), round(r["custo_unitario"], 4), round(r["preco_venda"], 2), round(r["margem_percentual"], 2)])
     arquivos.append(cam_rec)
 
     # 3. Batches
@@ -1166,6 +1674,16 @@ def exportar_csv_tabelas(diretorio_destino):
             w.writerow([m["id"], m["data"], m["tipo"], m["categoria"], m["descricao"], round(m["valor"], 2)])
     arquivos.append(cam_fin)
 
+    # 5. Operational Products (when requested from UI)
+    if incluir_operacionais:
+        cam_op = os.path.join(diretorio_destino, "harerp_operational.csv")
+        with open(cam_op, "w", newline="", encoding="utf-8-sig") as f:
+            w = csv.writer(f, delimiter=";")
+            w.writerow(["ID", "Name", "Brand", "Category", "Unit", "Quantity", "Min Stock", "Unit Cost", "Notes", "Created Date"])
+            for p in listar_produtos_operacionais():
+                w.writerow([p["id"], p["nome"], p["marca"], p["categoria"], p["unidade"], p["quantidade"], p["estoque_minimo"], p["preco_custo"], p["observacao"], p["data_cadastro"]])
+        arquivos.append(cam_op)
+
     return arquivos
 
 
@@ -1177,16 +1695,23 @@ def popular_dados_exemplo():
         return False
 
     # 1. Ingredientes
-    i_farinha = adicionar_ingrediente("Farinha de Trigo Especial", "Dona Benta", "Secos", 25.0, 5.0, "kg", 5.80)
-    i_acucar  = adicionar_ingrediente("Açúcar Refinado", "União", "Secos", 15.0, 4.0, "kg", 4.50)
-    i_choc    = adicionar_ingrediente("Chocolate Meio Amargo 50%", "Callebaut", "Chocolates", 8.0, 3.0, "kg", 48.00)
+    i_farinha = adicionar_ingrediente("Farinha de Trigo Especial", "Dona Benta", "Secos e Farináceos", 25.0, 5.0, "kg", 5.80)
+    i_acucar  = adicionar_ingrediente("Açúcar Refinado", "União", "Secos e Farináceos", 15.0, 4.0, "kg", 4.50)
+    i_choc    = adicionar_ingrediente("Chocolate Meio Amargo 50%", "Callebaut", "Chocolates e Cacau", 8.0, 3.0, "kg", 48.00)
     i_manteiga= adicionar_ingrediente("Manteiga Sem Sal", "Aviação", "Laticínios", 6.0, 2.0, "kg", 38.00)
-    i_ovos    = adicionar_ingrediente("Ovos Grandes", "Granja Ouro", "Perecíveis", 120.0, 30.0, "un", 0.75)
-    i_emb     = adicionar_ingrediente("Embalagem Kraft Individual", "PackEco", "Embalagens", 15.0, 20.0, "un", 1.10)
+    i_ovos    = adicionar_ingrediente("Ovos Grandes", "Granja Ouro", "Perecíveis e Ovos", 120.0, 30.0, "un", 0.75)
+    i_emb     = adicionar_ingrediente("Embalagem Kraft Individual", "PackEco", "Embalagens de Produto", 15.0, 20.0, "un", 1.10)
+
+    # 1b. Produtos Operacionais
+    adicionar_produto_operacional("Detergente Neutro Profissional 5L", "Ypê Pro", "Limpeza e Higiene", 4.0, 2.0, "un", 24.90, "Higienização da bancada e utensílios")
+    adicionar_produto_operacional("Luvas Nitrílicas Descartáveis (Cx 100)", "Supermax", "Descartáveis", 3.0, 2.0, "cx", 32.00, "Manipulação de alimentos")
+    adicionar_produto_operacional("Rolo Filme PVC Alimentício 300m", " Wyda", "Embalagens Operacionais", 2.0, 1.0, "un", 45.00, "Proteção de massas em descanso")
+    adicionar_produto_operacional("Papel Manteiga Antiaderente", "Dover Roll", "Utensílios de Produção", 5.0, 3.0, "un", 14.50, "Forração de assadeiras")
 
     # 2. Receitas
     r_brownie = salvar_receita(
         nome="Brownie Artesanal Intenso",
+        categoria="Confeitaria e Doces",
         rendimento=12,
         observacao="Assar a 180°C por 25 minutos",
         validade_dias=7,
@@ -1202,6 +1727,7 @@ def popular_dados_exemplo():
     )
     r_cookie = salvar_receita(
         nome="Cookie Clássico com Gotas de Chocolate",
+        categoria="Confeitaria e Doces",
         rendimento=10,
         observacao="Massa descansada 24h na geladeira",
         validade_dias=10,

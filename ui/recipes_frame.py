@@ -16,6 +16,7 @@ from ui.utils import (
     compatible_units,
     convert_quantity,
     enable_treeview_sorting,
+    open_category_manager,
 )
 
 
@@ -36,6 +37,7 @@ class RecipesFrame(ttk.Frame):
         self._build_right_panel()
         ThemeManager.register_listener(self._on_theme_change)
         I18n.register_listener(self._on_language_change)
+        self.refresh_categories()
         self.refresh_ingredients_map()
         self.refresh_recipes_list()
 
@@ -54,34 +56,50 @@ class RecipesFrame(ttk.Frame):
             row=0, column=1, pady=3, padx=(8, 0), sticky="w"
         )
 
+        self.lbl_cat = ttk.Label(self.card_rec, text=t("rec_category"), style="Card.TLabel")
+        self.lbl_cat.grid(row=1, column=0, sticky="w", pady=3)
+        cat_frame = ttk.Frame(self.card_rec, style="Card.TFrame")
+        cat_frame.grid(row=1, column=1, sticky="w", pady=3, padx=(8, 0))
+        self.categoria_var = tk.StringVar()
+        self.combo_cat = ttk.Combobox(
+            cat_frame, textvariable=self.categoria_var, width=18
+        )
+        self.combo_cat.pack(side="left")
+        self.btn_cat_mgr = ttk.Button(
+            cat_frame,
+            text=t("cat_btn_manage"),
+            command=self._open_category_dialog,
+        )
+        self.btn_cat_mgr.pack(side="left", padx=(4, 0))
+
         self.lbl_yield = ttk.Label(self.card_rec, text=t("rec_yield"), style="Card.TLabel")
-        self.lbl_yield.grid(row=1, column=0, sticky="w", pady=3)
+        self.lbl_yield.grid(row=2, column=0, sticky="w", pady=3)
         self.rend_var = tk.StringVar(value="1")
         self.rend_var.trace_add("write", lambda *_: self._update_cost_labels())
         ttk.Entry(self.card_rec, textvariable=self.rend_var, width=10).grid(
-            row=1, column=1, sticky="w", pady=3, padx=(8, 0)
-        )
-
-        self.lbl_shelf = ttk.Label(self.card_rec, text=t("rec_shelf_life"), style="Card.TLabel")
-        self.lbl_shelf.grid(row=2, column=0, sticky="w", pady=3)
-        self.validade_var = tk.StringVar()
-        ttk.Entry(self.card_rec, textvariable=self.validade_var, width=10).grid(
             row=2, column=1, sticky="w", pady=3, padx=(8, 0)
         )
 
-        self.lbl_sell = ttk.Label(self.card_rec, text=t("rec_sell_price"), style="Card.TLabel")
-        self.lbl_sell.grid(row=3, column=0, sticky="w", pady=3)
-        self.preco_venda_var = tk.StringVar()
-        self.preco_venda_var.trace_add("write", lambda *_: self._update_cost_labels())
-        ttk.Entry(self.card_rec, textvariable=self.preco_venda_var, width=12).grid(
+        self.lbl_shelf = ttk.Label(self.card_rec, text=t("rec_shelf_life"), style="Card.TLabel")
+        self.lbl_shelf.grid(row=3, column=0, sticky="w", pady=3)
+        self.validade_var = tk.StringVar()
+        ttk.Entry(self.card_rec, textvariable=self.validade_var, width=10).grid(
             row=3, column=1, sticky="w", pady=3, padx=(8, 0)
         )
 
+        self.lbl_sell = ttk.Label(self.card_rec, text=t("rec_sell_price"), style="Card.TLabel")
+        self.lbl_sell.grid(row=4, column=0, sticky="w", pady=3)
+        self.preco_venda_var = tk.StringVar()
+        self.preco_venda_var.trace_add("write", lambda *_: self._update_cost_labels())
+        ttk.Entry(self.card_rec, textvariable=self.preco_venda_var, width=12).grid(
+            row=4, column=1, sticky="w", pady=3, padx=(8, 0)
+        )
+
         self.lbl_notes = ttk.Label(self.card_rec, text=t("rec_notes"), style="Card.TLabel")
-        self.lbl_notes.grid(row=4, column=0, sticky="w", pady=3)
+        self.lbl_notes.grid(row=5, column=0, sticky="w", pady=3)
         self.obs_var = tk.StringVar()
         ttk.Entry(self.card_rec, textvariable=self.obs_var, width=30).grid(
-            row=4, column=1, pady=3, padx=(8, 0), sticky="w"
+            row=5, column=1, pady=3, padx=(8, 0), sticky="w"
         )
 
         # ── Batch Composition
@@ -152,14 +170,28 @@ class RecipesFrame(ttk.Frame):
         right.grid_rowconfigure(1, weight=1)
         right.grid_columnconfigure(0, weight=1)
 
-        self.lbl_list_title = ttk.Label(right, text=t("rec_list_title"), style="SectionTitle.TLabel")
-        self.lbl_list_title.grid(row=0, column=0, sticky="w", pady=(0, 6))
+        top_bar = ttk.Frame(right)
+        top_bar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
 
-        cols = ("id", "nome", "rendimento", "validade_dias", "custo_unitario", "preco_venda", "margem")
+        self.lbl_list_title = ttk.Label(top_bar, text=t("rec_list_title"), style="SectionTitle.TLabel")
+        self.lbl_list_title.pack(side="left")
+
+        filter_box = ttk.Frame(top_bar)
+        filter_box.pack(side="right")
+        self.lbl_filter_cat = ttk.Label(filter_box, text=t("cat_filter_lbl"))
+        self.lbl_filter_cat.pack(side="left", padx=(0, 4))
+        self.filtro_cat_var = tk.StringVar(value=t("all"))
+        self.combo_filtro_cat = ttk.Combobox(
+            filter_box, textvariable=self.filtro_cat_var, width=16, state="readonly"
+        )
+        self.combo_filtro_cat.pack(side="left")
+        self.combo_filtro_cat.bind("<<ComboboxSelected>>", lambda _: self.refresh_recipes_list())
+
+        cols = ("id", "nome", "categoria", "rendimento", "validade_dias", "custo_unitario", "preco_venda", "margem")
         self.tab_rec = ttk.Treeview(right, columns=cols, show="headings", height=22)
         widths = {
-            "id": 45, "nome": 175, "rendimento": 80, "validade_dias": 85,
-            "custo_unitario": 100, "preco_venda": 100, "margem": 90
+            "id": 42, "nome": 155, "categoria": 115, "rendimento": 75, "validade_dias": 80,
+            "custo_unitario": 95, "preco_venda": 95, "margem": 80
         }
         for c in cols:
             self.tab_rec.column(c, width=widths.get(c, 100), anchor="center")
@@ -188,6 +220,7 @@ class RecipesFrame(ttk.Frame):
         rec_heads = {
             "id": t("rec_col_id"),
             "nome": t("rec_col_rname"),
+            "categoria": t("rec_col_cat"),
             "rendimento": t("rec_col_yield"),
             "validade_dias": t("rec_col_val"),
             "custo_unitario": t("rec_col_ucost"),
@@ -197,6 +230,27 @@ class RecipesFrame(ttk.Frame):
         for c, txt in rec_heads.items():
             self.tab_rec.heading(c, text=txt)
 
+    def _open_category_dialog(self):
+        open_category_manager(
+            self,
+            default_scope="produto",
+            on_select=lambda nome: self.categoria_var.set(nome),
+            on_updated=self._on_categories_changed,
+        )
+
+    def _on_categories_changed(self):
+        self.refresh_categories()
+        self.refresh_recipes_list()
+        self.on_change()
+
+    def refresh_categories(self):
+        cats = database.listar_nomes_categorias("produto")
+        self.combo_cat["values"] = cats
+        all_lbl = t("all")
+        self.combo_filtro_cat["values"] = [all_lbl] + cats
+        if self.filtro_cat_var.get() not in self.combo_filtro_cat["values"]:
+            self.filtro_cat_var.set(all_lbl)
+
     def _on_theme_change(self):
         configure_treeview_tags(self.tab_comp)
         configure_treeview_tags(self.tab_rec)
@@ -205,6 +259,8 @@ class RecipesFrame(ttk.Frame):
     def _on_language_change(self):
         self.card_rec.config(text=t("rec_form_title"))
         self.lbl_name.config(text=t("rec_name"))
+        self.lbl_cat.config(text=t("rec_category"))
+        self.btn_cat_mgr.config(text=t("cat_btn_manage"))
         self.lbl_yield.config(text=t("rec_yield"))
         self.lbl_shelf.config(text=t("rec_shelf_life"))
         self.lbl_sell.config(text=t("rec_sell_price"))
@@ -218,11 +274,15 @@ class RecipesFrame(ttk.Frame):
         self.btn_new.config(text=t("rec_btn_new"))
         self.btn_del.config(text=t("rec_btn_del"))
         self.lbl_list_title.config(text=t("rec_list_title"))
+        self.lbl_filter_cat.config(text=t("cat_filter_lbl"))
         self._update_table_headings()
         self._update_cost_labels()
+        self.refresh_categories()
+        self.refresh_recipes_list()
 
     # ══════════════════════════════════════════ DATA
     def refresh_ingredients_map(self):
+        self.refresh_categories()
         ings = database.listar_ingredientes()
         self._ing_map = {}
         self._ing_unit = {}
@@ -241,15 +301,18 @@ class RecipesFrame(ttk.Frame):
             self.comp_unid_var.set(ubase)
 
     def refresh_recipes_list(self):
+        self.refresh_categories()
         for i in self.tab_rec.get_children():
             self.tab_rec.delete(i)
-        for idx, r in enumerate(database.analise_rentabilidade_receitas()):
+        cat_sel = self.filtro_cat_var.get().strip()
+        cat_filter = None if cat_sel in ("", t("all"), "All", "Todos") else cat_sel
+        for idx, r in enumerate(database.analise_rentabilidade_receitas(categoria=cat_filter)):
             val_str = str(r["validade_dias"]) if r["validade_dias"] else "—"
             venda_str = f'{r["preco_venda"]:.2f}' if r["preco_venda"] > 0 else "—"
             margem_str = f'{r["margem_percentual"]:.1f}%' if r["preco_venda"] > 0 else "—"
             zebra = "par" if idx % 2 == 0 else "impar"
             self.tab_rec.insert("", "end", iid=r["id"], tags=(zebra,), values=(
-                r["id"], r["nome"], r["rendimento"], val_str,
+                r["id"], r["nome"], r.get("categoria", "") or "—", r["rendimento"], val_str,
                 f'{r["custo_unitario"]:.4f}', venda_str, margem_str
             ))
 
@@ -300,6 +363,7 @@ class RecipesFrame(ttk.Frame):
         if not rec:
             return
         self.nome_var.set(rec["nome"])
+        self.categoria_var.set(rec["categoria"] if "categoria" in rec.keys() and rec["categoria"] else "")
         self.rend_var.set(rec["rendimento"])
         self.validade_var.set(str(rec["validade_dias"]) if rec["validade_dias"] else "")
         self.preco_venda_var.set(f'{rec["preco_venda"]:.2f}' if rec["preco_venda"] else "")
@@ -315,6 +379,33 @@ class RecipesFrame(ttk.Frame):
                 "subtotal":         c["preco_custo"] * c["quantidade"],
             })
         self._populate_comp_table()
+
+    def _auto_persist_if_editing(self):
+        """When editing an existing recipe, immediately persists component changes to SQLite."""
+        if self.recipe_id is not None and self.nome_var.get().strip() and self.components:
+            try:
+                rend = max(1, int(self.rend_var.get() or 1))
+                val_txt = self.validade_var.get().strip()
+                validade_dias = int(val_txt) if val_txt and int(val_txt) > 0 else None
+                pv_txt = self.preco_venda_var.get().strip().replace(",", ".")
+                preco_venda = max(0.0, float(pv_txt)) if pv_txt else 0.0
+                comps = [
+                    {"ingrediente_id": c["ingrediente_id"], "quantidade": c["quantidade"]}
+                    for c in self.components
+                ]
+                database.salvar_receita(
+                    self.nome_var.get().strip(),
+                    rend,
+                    self.obs_var.get().strip(),
+                    comps,
+                    receita_id=self.recipe_id,
+                    validade_dias=validade_dias,
+                    preco_venda=preco_venda,
+                    categoria=self.categoria_var.get().strip(),
+                )
+                self.refresh_recipes_list()
+            except Exception:
+                pass
 
     # ══════════════════════════════════════════ COMPONENT ACTIONS
     def _add_component(self):
@@ -344,6 +435,7 @@ class RecipesFrame(ttk.Frame):
                 c["subtotal"] = c["preco_custo"] * c["quantidade"]
                 self.comp_qtd_var.set("")
                 self._populate_comp_table()
+                self._auto_persist_if_editing()
                 return
 
         self.components.append({
@@ -356,6 +448,7 @@ class RecipesFrame(ttk.Frame):
         })
         self.comp_qtd_var.set("")
         self._populate_comp_table()
+        self._auto_persist_if_editing()
 
     def _remove_component(self):
         sel = self.tab_comp.selection()
@@ -365,6 +458,7 @@ class RecipesFrame(ttk.Frame):
         idx = self.tab_comp.index(sel[0])
         del self.components[idx]
         self._populate_comp_table()
+        self._auto_persist_if_editing()
 
     # ══════════════════════════════════════════ RECIPE ACTIONS
     def save(self):
@@ -412,7 +506,8 @@ class RecipesFrame(ttk.Frame):
         database.salvar_receita(
             nome, rend, self.obs_var.get().strip(),
             comps, receita_id=self.recipe_id,
-            validade_dias=validade_dias, preco_venda=preco_venda
+            validade_dias=validade_dias, preco_venda=preco_venda,
+            categoria=self.categoria_var.get().strip(),
         )
         messagebox.showinfo(t("info_title"), t("rec_msg_saved"))
         self.clear()
@@ -432,6 +527,7 @@ class RecipesFrame(ttk.Frame):
     def clear(self):
         self.recipe_id = None
         self.nome_var.set("")
+        self.categoria_var.set("")
         self.rend_var.set("1")
         self.validade_var.set("")
         self.preco_venda_var.set("")
@@ -440,6 +536,7 @@ class RecipesFrame(ttk.Frame):
         self._populate_comp_table()
         self.tab_rec.selection_remove(self.tab_rec.selection())
 
-    # Compatibility alias
+    # Compatibility aliases
+    _refresh_map = refresh_ingredients_map
     _refresh_mapa = refresh_ingredients_map
 

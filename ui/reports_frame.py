@@ -119,7 +119,7 @@ class ReportsFrame(ttk.Frame):
         if not folder:
             return
         try:
-            files = database.exportar_csv_tabelas(folder)
+            files = database.exportar_csv_tabelas(folder, incluir_operacionais=True)
             msg = (
                 f"✔ {len(files)} CSV files exported to: {folder}"
                 if en

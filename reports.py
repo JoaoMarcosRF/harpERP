@@ -91,6 +91,49 @@ def export_excel(file_path):
         ws_ing.cell(row=i, column=11, value=p["data_cadastro"])
     _autofit_columns(ws_ing)
 
+    # --- 1b. Operational Products --------------------------------------------
+    ws_op = wb.create_sheet("Operational" if en else "Operacionais")
+    ws_op["A1"] = (
+        "harErp — Operational Products Inventory Report"
+        if en
+        else "harErp — Relatório de Estoque de Produtos Operacionais"
+    )
+    ws_op["A1"].font = TITLE_FONT
+    cols_op = (
+        [
+            "ID", "Item Name", "Brand/Supplier", "Category", "Unit",
+            "Quantity", "Min. Stock", "Unit Cost ($)",
+            "Total Value ($)", "Status", "Usage / Notes", "Created Date",
+        ]
+        if en
+        else [
+            "ID", "Nome", "Marca/Fornecedor", "Categoria", "Unidade",
+            "Quantidade", "Estoque Mínimo", "Custo Unit. (R$)",
+            "Valor em Estoque (R$)", "Status", "Uso / Observação", "Data Cadastro",
+        ]
+    )
+    _format_header(ws_op, 3, cols_op)
+    for i, p in enumerate(database.listar_produtos_operacionais(), start=4):
+        total_val = round(p["preco_custo"] * p["quantidade"], 2)
+        status = (
+            ("LOW STOCK" if en else "ABAIXO DO MÍNIMO")
+            if p["quantidade"] <= p["estoque_minimo"]
+            else "OK"
+        )
+        ws_op.cell(row=i, column=1, value=p["id"])
+        ws_op.cell(row=i, column=2, value=p["nome"])
+        ws_op.cell(row=i, column=3, value=p["marca"])
+        ws_op.cell(row=i, column=4, value=p["categoria"])
+        ws_op.cell(row=i, column=5, value=p["unidade"])
+        ws_op.cell(row=i, column=6, value=p["quantidade"])
+        ws_op.cell(row=i, column=7, value=p["estoque_minimo"])
+        ws_op.cell(row=i, column=8, value=round(p["preco_custo"], 4))
+        ws_op.cell(row=i, column=9, value=total_val)
+        ws_op.cell(row=i, column=10, value=status)
+        ws_op.cell(row=i, column=11, value=p["observacao"])
+        ws_op.cell(row=i, column=12, value=p["data_cadastro"])
+    _autofit_columns(ws_op)
+
     # --- 2. Recipes & Profitability ------------------------------------------
     ws_rec = wb.create_sheet("Recipes & Costs" if en else "Receitas e Custos")
     ws_rec["A1"] = (
@@ -101,13 +144,13 @@ def export_excel(file_path):
     ws_rec["A1"].font = TITLE_FONT
     cols_rec = (
         [
-            "ID", "Recipe", "Yield (un/batch)", "Shelf Life (days)",
+            "ID", "Recipe", "Category", "Yield (un/batch)", "Shelf Life (days)",
             "# Inputs", "Batch Cost ($)", "Unit Cost ($)",
             "Selling Price ($)", "Unit Profit ($)", "Margin (%)",
         ]
         if en
         else [
-            "ID", "Receita", "Rendimento (un/lote)", "Validade (dias)",
+            "ID", "Receita", "Categoria", "Rendimento (un/lote)", "Validade (dias)",
             "Nº Insumos", "Custo Lote (R$)", "Custo Unit. (R$)",
             "Preço Venda (R$)", "Lucro Unit. (R$)", "Margem (%)",
         ]
@@ -116,14 +159,15 @@ def export_excel(file_path):
     for i, r in enumerate(database.analise_rentabilidade_receitas(), start=4):
         ws_rec.cell(row=i, column=1, value=r["id"])
         ws_rec.cell(row=i, column=2, value=r["nome"])
-        ws_rec.cell(row=i, column=3, value=r["rendimento"])
-        ws_rec.cell(row=i, column=4, value=r["validade_dias"] or "—")
-        ws_rec.cell(row=i, column=5, value=r["n_ingredientes"])
-        ws_rec.cell(row=i, column=6, value=round(r["custo_lote"], 4))
-        ws_rec.cell(row=i, column=7, value=round(r["custo_unitario"], 4))
-        ws_rec.cell(row=i, column=8, value=round(r["preco_venda"], 2))
-        ws_rec.cell(row=i, column=9, value=round(r["lucro_unitario"], 2))
-        ws_rec.cell(row=i, column=10, value=round(r["margem_percentual"], 2))
+        ws_rec.cell(row=i, column=3, value=r.get("categoria", "") or "—")
+        ws_rec.cell(row=i, column=4, value=r["rendimento"])
+        ws_rec.cell(row=i, column=5, value=r["validade_dias"] or "—")
+        ws_rec.cell(row=i, column=6, value=r["n_ingredientes"])
+        ws_rec.cell(row=i, column=7, value=round(r["custo_lote"], 4))
+        ws_rec.cell(row=i, column=8, value=round(r["custo_unitario"], 4))
+        ws_rec.cell(row=i, column=9, value=round(r["preco_venda"], 2))
+        ws_rec.cell(row=i, column=10, value=round(r["lucro_unitario"], 2))
+        ws_rec.cell(row=i, column=11, value=round(r["margem_percentual"], 2))
     _autofit_columns(ws_rec)
 
     # --- 3. Product Batches --------------------------------------------------

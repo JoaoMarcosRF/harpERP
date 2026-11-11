@@ -16,6 +16,7 @@ import database
 from ui.theme import ThemeManager
 from ui.i18n import I18n, t
 from ui.ingredients_frame import IngredientsFrame
+from ui.operational_frame import OperationalFrame
 from ui.recipes_frame import RecipesFrame
 from ui.products_frame import ProductsFrame
 from ui.finance_frame import FinanceFrame
@@ -50,6 +51,7 @@ class HarErpApp(tk.Tk):
         nb.pack(fill="both", expand=True, padx=12, pady=(8, 4))
 
         self.ingredients_frame = IngredientsFrame(nb, on_change=self._on_change)
+        self.operational_frame = OperationalFrame(nb, on_change=self._on_change)
         self.recipes_frame = RecipesFrame(nb, on_change=self._on_change)
         self.products_frame = ProductsFrame(nb, on_change=self._on_change)
         self.finance_frame = FinanceFrame(nb, on_change=self._on_change)
@@ -58,6 +60,7 @@ class HarErpApp(tk.Tk):
 
         # Keep Portuguese attribute aliases for backward compatibility
         self.ingredientes_frame = self.ingredients_frame
+        self.operacionais_frame = self.operational_frame
         self.receitas_frame = self.recipes_frame
         self.produtos_frame = self.products_frame
         self.financeiro_frame = self.finance_frame
@@ -65,6 +68,7 @@ class HarErpApp(tk.Tk):
         self.relatorios_frame = self.reports_frame
 
         nb.add(self.ingredients_frame, text=t("tab_ingredients"))
+        nb.add(self.operational_frame, text=t("tab_operational"))
         nb.add(self.recipes_frame, text=t("tab_recipes"))
         nb.add(self.products_frame, text=t("tab_products"))
         nb.add(self.finance_frame, text=t("tab_finance"))
@@ -134,7 +138,7 @@ class HarErpApp(tk.Tk):
         self.bind("<Control-L>", lambda _: self._toggle_language())
         self.bind("<Control-b>", lambda _: self.reports_frame.backup_database())
         self.bind("<Control-B>", lambda _: self.reports_frame.backup_database())
-        for i in range(6):
+        for i in range(7):
             self.bind(f"<Control-Key-{i + 1}>", lambda _, idx=i: self.notebook.select(idx))
 
     def _toggle_theme(self):
@@ -156,6 +160,7 @@ class HarErpApp(tk.Tk):
             text=t("btn_theme_light") if ThemeManager._current_mode == "dark" else t("btn_theme_dark")
         )
         self.notebook.tab(self.ingredients_frame, text=t("tab_ingredients"))
+        self.notebook.tab(self.operational_frame, text=t("tab_operational"))
         self.notebook.tab(self.recipes_frame, text=t("tab_recipes"))
         self.notebook.tab(self.products_frame, text=t("tab_products"))
         self.notebook.tab(self.finance_frame, text=t("tab_finance"))
@@ -166,7 +171,7 @@ class HarErpApp(tk.Tk):
 
     def _refresh_top_summary(self):
         _, _, balance = database.saldo_atual()
-        alerts = len(database.ingredientes_abaixo_minimo())
+        alerts = len(database.ingredientes_abaixo_minimo()) + len(database.operacionais_abaixo_minimo())
         alert_txt = t("header_alert_warn", count=alerts) if alerts else t("header_alert_ok")
         self.lbl_top_status.config(text=f"{t('header_cash', saldo=balance)}{alert_txt}")
         if hasattr(self, "lbl_footer_left"):
@@ -178,7 +183,8 @@ class HarErpApp(tk.Tk):
     def _on_change(self):
         """Propagates cross-tab updates after any data modification."""
         self.ingredients_frame.refresh_list()
-        self.recipes_frame._refresh_map()
+        self.operational_frame.refresh_list()
+        self.recipes_frame.refresh_ingredients_map()
         self.products_frame.refresh_recipes()
         self.products_frame.refresh_batches()
         self.finance_frame.refresh_list()
@@ -192,6 +198,9 @@ class HarErpApp(tk.Tk):
 
     def _on_close(self):
         try:
+            if hasattr(self, "recipes_frame"):
+                self.recipes_frame._auto_persist_if_editing()
+            database.sincronizar_banco()
             plt.close("all")
             self.quit()
         finally:

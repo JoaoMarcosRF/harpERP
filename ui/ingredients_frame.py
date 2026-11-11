@@ -17,6 +17,7 @@ from ui.utils import (
     compatible_units,
     convert_quantity,
     enable_treeview_sorting,
+    open_category_manager,
 )
 
 
@@ -35,6 +36,7 @@ class IngredientsFrame(ttk.Frame):
         self._build_table_panel()
         ThemeManager.register_listener(self._on_theme_change)
         I18n.register_listener(self._on_language_change)
+        self.refresh_categories()
         self.refresh_list()
 
     def _build_left_panel(self):
@@ -69,9 +71,18 @@ class IngredientsFrame(ttk.Frame):
 
         self.lbl_cat = ttk.Label(self.card_reg, text=t("ing_category"), style="Card.TLabel")
         self.lbl_cat.grid(row=2, column=0, sticky="w", pady=3)
-        ttk.Entry(self.card_reg, textvariable=self.vars["categoria"], width=26).grid(
-            row=2, column=1, pady=3, padx=(8, 0), sticky="w"
+        cat_frame = ttk.Frame(self.card_reg, style="Card.TFrame")
+        cat_frame.grid(row=2, column=1, pady=3, padx=(8, 0), sticky="w")
+        self.combo_cat = ttk.Combobox(
+            cat_frame, textvariable=self.vars["categoria"], width=16
         )
+        self.combo_cat.pack(side="left")
+        self.btn_cat_mgr = ttk.Button(
+            cat_frame,
+            text=t("cat_btn_manage"),
+            command=self._open_category_dialog,
+        )
+        self.btn_cat_mgr.pack(side="left", padx=(4, 0))
 
         # Unit of measure dropdown (Combobox with side arrow)
         self.lbl_unit = ttk.Label(self.card_reg, text=t("ing_unit"), style="Card.TLabel")
@@ -175,19 +186,30 @@ class IngredientsFrame(ttk.Frame):
         # ── Search Card
         self.card_search = ttk.LabelFrame(left, text=t("ing_search_title"), padding=8)
         self.card_search.pack(fill="x", pady=(10, 0))
+        s_row1 = ttk.Frame(self.card_search, style="Card.TFrame")
+        s_row1.pack(fill="x", pady=(0, 4))
         self.busca_var = tk.StringVar()
-        ttk.Entry(self.card_search, textvariable=self.busca_var, width=20).pack(side="left")
+        ttk.Entry(s_row1, textvariable=self.busca_var, width=18).pack(side="left")
+        self.filtro_cat_var = tk.StringVar(value=t("all"))
+        self.combo_filtro_cat = ttk.Combobox(
+            s_row1, textvariable=self.filtro_cat_var, width=14, state="readonly"
+        )
+        self.combo_filtro_cat.pack(side="left", padx=(6, 0))
+        self.combo_filtro_cat.bind("<<ComboboxSelected>>", lambda _: self.refresh_list())
+
+        s_row2 = ttk.Frame(self.card_search, style="Card.TFrame")
+        s_row2.pack(fill="x")
         self.btn_search = ttk.Button(
-            self.card_search,
+            s_row2,
             text=t("btn_search"),
             style="Primary.TButton",
             command=lambda: self.refresh_list(self.busca_var.get()),
         )
-        self.btn_search.pack(side="left", padx=5)
+        self.btn_search.pack(side="left", padx=(0, 5))
         self.btn_clear_search = ttk.Button(
-            self.card_search,
+            s_row2,
             text=t("btn_clear"),
-            command=lambda: (self.busca_var.set(""), self.refresh_list()),
+            command=self._clear_filters,
         )
         self.btn_clear_search.pack(side="left")
 
@@ -268,6 +290,32 @@ class IngredientsFrame(ttk.Frame):
         for col, text in headings_mov.items():
             self.table_mov.heading(col, text=text)
 
+    def _open_category_dialog(self):
+        open_category_manager(
+            self,
+            default_scope="ingrediente",
+            on_select=lambda nome: self.vars["categoria"].set(nome),
+            on_updated=self._on_categories_changed,
+        )
+
+    def _on_categories_changed(self):
+        self.refresh_categories()
+        self.refresh_list()
+        self.on_change()
+
+    def refresh_categories(self):
+        cats = database.listar_nomes_categorias("ingrediente")
+        self.combo_cat["values"] = cats
+        all_lbl = t("all")
+        self.combo_filtro_cat["values"] = [all_lbl] + cats
+        if self.filtro_cat_var.get() not in self.combo_filtro_cat["values"]:
+            self.filtro_cat_var.set(all_lbl)
+
+    def _clear_filters(self):
+        self.busca_var.set("")
+        self.filtro_cat_var.set(t("all"))
+        self.refresh_list()
+
     def _on_theme_change(self):
         configure_treeview_tags(self.table)
         configure_treeview_tags(self.table_mov)
@@ -277,6 +325,7 @@ class IngredientsFrame(ttk.Frame):
         self.lbl_name.config(text=t("ing_name"))
         self.lbl_brand.config(text=t("ing_brand"))
         self.lbl_cat.config(text=t("ing_category"))
+        self.btn_cat_mgr.config(text=t("cat_btn_manage"))
         self.lbl_unit.config(text=t("ing_unit"))
         self.lbl_qty.config(text=t("ing_init_qty"))
         self.lbl_min.config(text=t("ing_min_stock"))
@@ -304,13 +353,18 @@ class IngredientsFrame(ttk.Frame):
         self.nb.tab(0, text=t("ing_subtab_stock"))
         self.nb.tab(1, text=t("ing_subtab_history"))
         self._update_table_headings()
+        self.refresh_categories()
         self.refresh_list()
 
     # ══════════════════════════════════════════ DATA
     def refresh_list(self, search_term=None):
+        self.refresh_categories()
         for i in self.table.get_children():
             self.table.delete(i)
-        for idx, p in enumerate(database.listar_ingredientes(search_term)):
+        termo = search_term if search_term is not None else self.busca_var.get().strip()
+        cat_sel = self.filtro_cat_var.get().strip()
+        cat_filter = None if cat_sel in ("", t("all"), "All", "Todos") else cat_sel
+        for idx, p in enumerate(database.listar_ingredientes(termo or None, categoria=cat_filter)):
             valor_total = round(p["preco_custo"] * p["quantidade"], 2)
             zebra = "par" if idx % 2 == 0 else "impar"
             tag = ("baixo",) if p["quantidade"] <= p["estoque_minimo"] else (zebra,)
@@ -394,7 +448,7 @@ class IngredientsFrame(ttk.Frame):
             messagebox.showinfo(t("info_title"), t("ing_msg_saved"))
         else:
             database.atualizar_ingrediente(
-                self.selected_id, nome, marca, categoria, est_min, unidade, preco_custo
+                self.selected_id, nome, marca, categoria, est_min, unidade, preco_custo, quantidade=qtd
             )
             messagebox.showinfo(t("info_title"), t("ing_msg_updated"))
 

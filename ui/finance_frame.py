@@ -10,7 +10,7 @@ from tkinter import ttk, messagebox
 
 import database
 from ui.theme import ThemeManager, configure_treeview_tags
-from ui.utils import enable_treeview_sorting
+from ui.utils import enable_treeview_sorting, open_category_manager
 from ui.i18n import I18n, t
 
 
@@ -55,7 +55,19 @@ class FinanceFrame(ttk.Frame):
             lbl.grid(row=i, column=0, sticky="w", pady=4)
             self.form_labels[t_key] = lbl
             var = tk.StringVar()
-            ttk.Entry(self.form_frame, textvariable=var, width=28).grid(row=i, column=1, pady=4, padx=(8, 0))
+            if key == "categoria":
+                cat_box = ttk.Frame(self.form_frame, style="Card.TFrame")
+                cat_box.grid(row=i, column=1, sticky="w", pady=4, padx=(8, 0))
+                self.combo_cat = ttk.Combobox(cat_box, textvariable=var, width=16)
+                self.combo_cat.pack(side="left")
+                self.btn_cat_mgr = ttk.Button(
+                    cat_box,
+                    text=t("cat_btn_manage"),
+                    command=self._open_category_dialog,
+                )
+                self.btn_cat_mgr.pack(side="left", padx=(4, 0))
+            else:
+                ttk.Entry(self.form_frame, textvariable=var, width=28).grid(row=i, column=1, pady=4, padx=(8, 0))
             self.vars[key] = var
         self.vars["data"].set(database.hoje())
 
@@ -152,6 +164,23 @@ class FinanceFrame(ttk.Frame):
         for col, text in headings.items():
             self.table.heading(col, text=text)
 
+    def _open_category_dialog(self):
+        open_category_manager(
+            self,
+            default_scope="financeiro",
+            on_select=lambda nome: self.vars["categoria"].set(nome),
+            on_updated=self._on_categories_changed,
+        )
+
+    def _on_categories_changed(self):
+        self.refresh_categories()
+        self.refresh_list()
+        self.on_change()
+
+    def refresh_categories(self):
+        if hasattr(self, "combo_cat"):
+            self.combo_cat["values"] = database.listar_nomes_categorias("financeiro")
+
     def _on_theme_change(self):
         configure_treeview_tags(self.table)
         self._update_summary_colors()
@@ -163,6 +192,8 @@ class FinanceFrame(ttk.Frame):
         self.rb_exp.config(text=t("expense"))
         for t_key, lbl in self.form_labels.items():
             lbl.config(text=t(t_key))
+        if hasattr(self, "btn_cat_mgr"):
+            self.btn_cat_mgr.config(text=t("cat_btn_manage"))
         self.btn_save.config(text=t("btn_save"))
         self.btn_new.config(text=t("btn_new"))
         self.btn_del.config(text=t("btn_delete"))
@@ -194,6 +225,7 @@ class FinanceFrame(ttk.Frame):
         self.refresh_list()
 
     def refresh_list(self):
+        self.refresh_categories()
         for item in self.table.get_children():
             self.table.delete(item)
 
